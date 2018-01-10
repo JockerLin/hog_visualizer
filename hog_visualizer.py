@@ -2,82 +2,110 @@ import cv2
 import numpy as np
 
 def visualize_hog(img):
-    m = cv2.imread(img, -1)
-    m = cv2.resize(m, (600, 600))
-    img = cv2.resize(m, (128, 128))
-    scale = np.array(m.shape) / np.array(img.shape)
-    y_sz = img.shape[0]
-    x_sz = img.shape[1]
+    '''
+    A function to visualize the results of a HOG calculation on a given image
 
-    if len(img.shape) == 4:
-        for i in range(y_sz):
-            for j in range(x_sz):
+    Parameters:
+    img : The location of the image file
+    '''
+
+    #TODO:
+    #   Fix hog_shape to work with non-default cell_sz
+    #   Fix calculation of cell to work with non-default block_sz (replace the 2)
+
+    m = cv2.imread(img, -1)
+    win_sz = (128, 128)
+    cell_sz = np.array((8, 8))
+    block_sz = np.array((16, 16))
+    stride = np.array((8, 8))
+    nbins = 9
+
+    # Fix scaling so the maximum dimension is 600
+    m_scale = 600 / np.max(m.shape)
+    m = cv2.resize(m, None, fx=m_scale, fy=m_scale)
+
+    # Resize the image for HOG extraction
+    img = cv2.resize(m, win_sz)
+    img_scale = np.array(m.shape[0:2]) / np.array(img.shape[0:2])
+
+    # If there's an alpha channel, remove it and replace it with a white
+    # background
+    if img.shape[2] == 4:
+        for i in range(img.shape[0]):
+            for j in range(img.shape[1]):
                 if img[i,j,3] == 0:
                     for k in range(3):
                         img[i,j,k] = 255
 
+    # hog.compute oddly doesn't work without this explicit type conversion
     img = img[:,:,0:3].astype(np.uint8)
 
-    hog = cv2.HOGDescriptor((y_sz,x_sz), (16,16), (8, 8), (8, 8), 9)
-    hog_d = hog.compute(img)
-    np.savetxt('test.csv', hog_d.reshape(-1,36), delimiter=',')
-    hog_d = hog_d.reshape(int(128/8)-1,int(128/8)-1,9*4)
-    midpoints = get_midpoints(img, 8, 16)
+    # Calculate the HOG features
+    hog = cv2.HOGDescriptor((img.shape[0],img.shape[1]), 
+                            tuple(block_sz), 
+                            tuple(cell_sz), 
+                            tuple(stride), 
+                            nbins)
+    hog_d = hog.compute(img, locations=[(0,0)])
 
-    draw_line(m, scale[0:2], hog_d, midpoints)
+    # Reshapes the HOG array to correspond to position on the image
+    hog_shape = (((img.shape[0]/cell_sz[0] - block_sz[0]/cell_sz[0] + 1).astype(np.uint32),
+                  (img.shape[1]/cell_sz[1] - block_sz[1]/cell_sz[1] + 1).astype(np.uint32),
+                  (np.prod(block_sz/cell_sz) * nbins).astype(np.uint32)
+                ))
+    hog_d = hog_d.reshape(hog_shape)
+
+    # Retrieves the cell data from each block. Outer loop consists of the HOG
+    # descriptor blocks, while inner loops handle the cells within each block.
+    # Each cell is renormalized, so only exceptionally strong gradients should
+    # show strong lines.
+    cell_val = np.zeros(((img.shape[0]/cell_sz[0]).astype(np.uint32),
+                         (img.shape[1]/cell_sz[1]).astype(np.uint32),
+                         nbins
+                       ))     
+    for i in range(hog_d.shape[0]):
+        for j in range(hog_d.shape[1]):
+            for ii in range((block_sz[0]/cell_sz[0]).astype(np.uint32)):
+                for jj in range((block_sz[1]/cell_sz[1]).astype(np.uint32)):
+                    cell = hog_d[i,j,((ii*2+jj)*nbins):((ii*2+jj+1)*nbins)]
+                    if np.max(cell) != 0:
+                        cell = cell / np.linalg.norm(cell)
+                    cell_val[i+ii,j+jj,:] = cell
+
+    # Draws the visualization on the original image
+    for i in range(cell_val.shape[0]):
+        for j in range(cell_val.shape[1]):
+            for k in range(nbins):
+                # Creates a unit vector corresponding to theta
+                theta = -np.pi/2 + np.pi * (k/nbins)
+                u_vec = np.array((np.sin(theta), -np.cos(theta)))
+
+                # Creates the vector that will be drawn on the midpoint of the
+                # cell
+                vec = u_vec * cell_val[i,j,k] * np.min(cell_sz * img_scale[::-1]) / 2
+
+                # Specifies the midpoint in beg, then sets the endpoints of
+                # each line in end, based on the values in vec
+                beg = (cell_sz/2 + np.array((i, j)) * cell_sz) * img_scale[::-1]
+                end1 = beg + vec
+                end2 = beg - vec
+                beg = beg.astype(np.uint32)
+                end1 = end1.astype(np.uint32)
+                end2 = end2.astype(np.uint32)
+
+                # Draws the lines
+                if cell_val[i,j,k] == np.max(cell_val[i,j,:]):
+                    cv2.line(m, tuple(beg), tuple(end1), (255,0,0), 1)
+                    cv2.line(m, tuple(beg), tuple(end2), (255,0,0), 1)
+
     cv2.imshow('img', m)
     cv2.waitKey(0)
-    return
 
-
-def draw_line(m, scale, val, midpoints):
-
-    max_line_len = np.min(scale)
-    for i in range(midpoints.shape[0]):
-        for j in range(midpoints.shape[1]):
-            for k in range(9):
-                angle = np.pi * k/9 * np.pi/2
-                unit = np.array((np.sin(angle), np.cos(angle)))
-                line_len = val[i,j,k]
-                if np.max(val[i,j,:]) != 0:
-                    line_len = line_len / np.max(val[i,j,:])
-                beg = midpoints[i,j,:] * scale
-                end = beg + unit * line_len * max_line_len * 4
-                cv2.line(m, tuple(beg.astype(np.uint32)), tuple(end.astype(np.uint32)), (255,0,0), 1)
-                #end = beg - unit * line_len * max_line_len * 4
-                #cv2.line(m, tuple(beg.astype(np.uint32)), tuple(end.astype(np.uint32)), (255,0,0), 1)
-
-
-#            for k in range(9):
-#                angle = np.pi * k/9 - np.pi/2
-#                unit = np.array((-np.sin(angle), np.cos(angle)))
-#                line_len = val[i,j,k] + val[i,j,(k+9)] + val[i,j,(k+18)] + val[i,j,(k+27)]
-#                beg = midpoints[i,j,:] * scale
-#                end = beg + unit * line_len * max_line_len * 4
-#                cv2.line(m, tuple(beg.astype(np.uint32)), tuple(end.astype(np.uint32)), (255,0,0), 1)
-#                end = beg - unit * line_len * max_line_len * 4
-#                cv2.line(m, tuple(beg.astype(np.uint32)), tuple(end.astype(np.uint32)), (255,0,0), 1)
-
-    return
-
-
-def get_midpoints(img, cell_sz, block_sz):
-    y_sz = np.floor(img.shape[0]/cell_sz) - (block_sz/cell_sz - 1)
-    x_sz = np.floor(img.shape[1]/cell_sz) - (block_sz/cell_sz - 1)
-    y_sz = y_sz.astype(np.uint8)
-    x_sz = x_sz.astype(np.uint8)
-    midpoints = np.zeros((y_sz, x_sz, 2))
-
-    for i in range(y_sz):
-        for j in range(x_sz):
-            midpoints[i, j, 0] = (i+1) * block_sz / 2
-            midpoints[i, j, 1] = (j+1) * block_sz / 2
-
-    return midpoints
+    return m
 
 
 if __name__ == '__main__':
-    visualize_hog('circle.png')
+    visualize_hog('test.png')
     #visualize_hog('test.jpeg')
     #visualize_hog('rin1.png')
 
